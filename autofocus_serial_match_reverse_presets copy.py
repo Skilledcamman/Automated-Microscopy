@@ -14,10 +14,8 @@ Key points for in-process usage:
  - Provide options via dict (same names as CLI arguments).
  - Provide log_callback(str) to receive progress/log messages (optional).
  - Provide a threading.Event stop_event to abort (optional).
- 
-Change: After homing completes, the current position is read and persisted to
-a small JSON file ("last_homed_position.json") so the last homed location is stored.
 """
+
 import argparse
 import json
 import os
@@ -562,17 +560,6 @@ def run_autofocus(ser, cap, options, log_callback=None, stop_event=None):
     pos, max_limit, objective, homed, qlines = get_status_Q_ser(ser, verbose=False)
     if log_callback:
         log(f"Q lines: {qlines}")
-
-    # --- Persist helper: store last homed position to disk ---
-    def persist_homed_position(position, path="last_homed_position.json"):
-        try:
-            data = {"position": int(position), "timestamp": time.time()}
-            with open(path, "w", encoding="utf-8") as fp:
-                json.dump(data, fp, indent=2)
-            log(f"Persisted homed position to {path}: {position}")
-        except Exception as e:
-            log(f"Failed to persist homed position: {e}")
-
     if objective:
         log(f"Detected objective: {objective}")
         preset = presets.get(str(objective))
@@ -612,14 +599,6 @@ def run_autofocus(ser, cap, options, log_callback=None, stop_event=None):
     # --- Ensure controller is homed before starting main autofocus ---
     if homed is True:
         log("Controller reports homed. Proceeding.")
-        # Ensure pos is available and persist it
-        if pos is None:
-            pos = get_position_ser(ser, verbose=False)
-        if pos is not None:
-            try:
-                persist_homed_position(pos)
-            except Exception:
-                pass
     else:
         log("Controller not reported homed. Sending hard-home (Z) and waiting for homed state...")
         send_command_ser(ser, "Z")
@@ -645,14 +624,8 @@ def run_autofocus(ser, cap, options, log_callback=None, stop_event=None):
         if homed is not True:
             raise RuntimeError("Controller did not report homed after issuing Z; aborting autofocus.")
         log("Controller reports homed. Proceeding with autofocus.")
-        # Make sure we have a current position after homing and persist it
         if pos is None:
             pos = get_position_ser(ser, verbose=False)
-        if pos is not None:
-            try:
-                persist_homed_position(pos)
-            except Exception:
-                pass
 
     # forward sweep (coarse)
     recorded = forward_sweep(ser, cap, step_size=step_size, rpm=rpm,

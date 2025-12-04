@@ -1,0 +1,281 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Autofocus UI — Serial + Camera + AF Launcher</title>
+  <style>
+    body { font-family: Arial, sans-serif; max-width: 1100px; margin: 1rem auto; }
+    header { display:flex; justify-content:space-between; align-items:center; gap:1rem; }
+    .layout { display:flex; gap:1rem; }
+    .left { flex: 1 1 520px; }
+    .right { width: 520px; }
+    .controls { margin: 0.6rem 0; display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap; }
+    input[type="text"] { flex: 1 1 320px; padding: .45rem .6rem; font-size:1rem; }
+    button { padding: .45rem .8rem; font-size:1rem; }
+    #log { background: #0b0f14; color: #eee; padding: .6rem; height: 260px; overflow: auto; border-radius:6px; }
+    .meta { color: #9aa; font-size: .9rem; margin-bottom: .3rem; }
+    .small { font-size: .85rem; color:#bbb; }
+    .log-line { font-family: monospace; white-space: pre-wrap; padding:2px 0; }
+    .log-tx { color:#1e90ff; }
+    .log-serial { color:#e6e6e6; }
+    .log-af { color:#f0a500; }
+    .log-stream { color:#8ad; }
+    .camera-card { background:#071018; padding: 8px; border-radius:6px; }
+    #videoImg { width: 100%; height: auto; background: #000; display:block; }
+    .af-controls { display:flex; gap:0.5rem; margin-top:8px; }
+    .af-controls > button { min-width:120px; }
+    .objective-row { display:flex; gap:0.5rem; align-items:center; margin-top:8px; }
+    select { padding:.35rem; font-size:1rem; }
+    .status { font-size:.9rem; color:#9aa; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Autofocus UI — Serial + Camera</h1>
+    <div class="meta status">
+      SSE: <span id="sseState">connecting</span>
+      &nbsp;|&nbsp; Serial: <span id="serialState">active</span>
+      &nbsp;|&nbsp; Camera: <span id="cameraState">stopped</span>
+    </div>
+  </header>
+
+  <div class="layout">
+    <div class="left">
+      <section>
+        <div class="controls">
+          <input id="cmdInput" type="text" placeholder="Serial command (Z, P, U, D, G100)"/>
+          <button id="sendBtn">Send</button>
+          <button id="clearBtn">Clear Log</button>
+        </div>
+
+        <div class="small">Autofocus CLI launcher: Choose mode and click to run the CLI script as subprocess.</div>
+        <div class="af-controls">
+          <button id="afCoarseBtn">AF Coarse</button>
+          <button id="afMediumBtn">AF Medium</button>
+          <button id="afFineBtn">AF Fine</button>
+          <button id="afStopBtn">Stop AF</button>
+        </div>
+        <div style="margin-top:8px; font-size:.95rem; color:#9aa">
+          AF status: <span id="afStatus">idle</span>
+        </div>
+
+        <section style="margin-top:10px">
+          <h2>Console Log</h2>
+          <div id="log" aria-live="polite"></div>
+        </section>
+      </section>
+    </div>
+
+    <div class="right">
+      <div class="camera-card">
+        <h3 style="margin-top:0">Live Camera</h3>
+        <img id="videoImg" alt="Live camera feed" src="" />
+        <div style="display:flex; gap:.5rem; margin-top:6px;">
+          <button id="camToggleBtn">Start Camera</button>
+        </div>
+
+        <div class="objective-row">
+          <label for="objectiveSelect" style="color:#9aa">Objective:</label>
+          <select id="objectiveSelect">
+            <option value="4">4x</option>
+            <option value="10">10x</option>
+            <option value="40">40x</option>
+          </select>
+          <button id="applyObjectiveBtn">Apply</button>
+        </div>
+
+        <div style="margin-top:8px; color:#9aa; font-size:.9rem">
+          Current objective: <span id="currentObjective">-</span><br/>
+          Exposure: <span id="currentExposure">-</span>  Gain: <span id="currentGain">-</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const cmdInput = document.getElementById('cmdInput');
+    const sendBtn = document.getElementById('sendBtn');
+    const clearBtn = document.getElementById('clearBtn');
+    const logEl = document.getElementById('log');
+
+    const afCoarseBtn = document.getElementById('afCoarseBtn');
+    const afMediumBtn = document.getElementById('afMediumBtn');
+    const afFineBtn = document.getElementById('afFineBtn');
+    const afStopBtn = document.getElementById('afStopBtn');
+    const afStatusEl = document.getElementById('afStatus');
+
+    const videoImg = document.getElementById('videoImg');
+    const camToggleBtn = document.getElementById('camToggleBtn');
+
+    const objectiveSelect = document.getElementById('objectiveSelect');
+    const applyObjectiveBtn = document.getElementById('applyObjectiveBtn');
+    const currentObjective = document.getElementById('currentObjective');
+    const currentExposure = document.getElementById('currentExposure');
+    const currentGain = document.getElementById('currentGain');
+
+    const sseState = document.getElementById('sseState');
+    const serialState = document.getElementById('serialState');
+    const cameraState = document.getElementById('cameraState');
+
+    function appendLog(msg, cls='log-serial') {
+      const d = document.createElement('div');
+      d.className = 'log-line ' + cls;
+      d.textContent = msg;
+      logEl.appendChild(d);
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    async function sendCommand(cmd) {
+      if (!cmd || !cmd.trim()) return;
+      appendLog('$ ' + cmd, 'log-tx');
+      try {
+        const res = await fetch('/api/cmd', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({cmd: cmd})
+        });
+        const j = await res.json();
+        if (!j.ok) appendLog('cmd error: ' + (j.error||JSON.stringify(j)), 'log-af');
+      } catch (e) {
+        appendLog('send error: ' + e, 'log-af');
+      }
+    }
+
+    sendBtn.onclick = () => { sendCommand(cmdInput.value.trim()); cmdInput.value=''; cmdInput.focus(); };
+    clearBtn.onclick = () => { logEl.textContent=''; cmdInput.focus(); };
+
+    // camera controls
+    camToggleBtn.addEventListener('click', async () => {
+      try {
+        const r = await fetch('/camera/status'); const s = await r.json();
+        if (s.running) {
+          await fetch('/camera/stop', {method:'POST'});
+          videoImg.src = '';
+        } else {
+          await fetch('/camera/start', {method:'POST'});
+          videoImg.src = '/video_feed';
+        }
+        setTimeout(updateCamBtn, 200);
+      } catch(e) { appendLog('cam toggle err: '+e,'log-af'); }
+    });
+    async function updateCamBtn(){
+      const r = await fetch('/camera/status'); const j = await r.json();
+      camToggleBtn.textContent = j.running ? 'Stop Camera' : 'Start Camera';
+      cameraState.textContent = j.camera_paused_for_af ? 'paused for AF' : (j.running ? 'running' : 'stopped');
+      cameraState.style.color = j.camera_paused_for_af ? '#f0a500' : (j.running ? '#3ddc84' : '#9aa');
+      if (j.running && !j.camera_paused_for_af) videoImg.src='/video_feed';
+      else videoImg.src = '';
+      currentExposure.textContent = j.exposure == null ? '-' : j.exposure;
+      currentGain.textContent = j.gain == null ? '-' : j.gain;
+    }
+
+    // SSE for logs
+    const es = new EventSource('/stream');
+    es.onopen = () => { sseState.textContent = 'connected'; sseState.style.color = '#3ddc84'; updateAFStatus(); updateCamBtn(); updateSerialState(); };
+    es.onmessage = (e) => {
+      try {
+        const payload = JSON.parse(e.data);
+        const kind = payload.kind || 'info';
+        const msg = payload.msg || '';
+        if (kind === 'serial') appendLog(msg, 'log-serial');
+        else if (kind === 'autofocus') appendLog(msg, 'log-af');
+        else appendLog(msg, 'log-stream');
+        // refresh states when relevant messages appear
+        if (msg.toLowerCase().includes('serial port closed') || msg.toLowerCase().includes('serial reader resumed')) {
+          updateSerialState();
+        }
+        if (msg.toLowerCase().includes('camera stopped for exclusive af') || msg.toLowerCase().includes('camera restarted')) {
+          updateCamBtn();
+        }
+      } catch (ex) {
+        appendLog(e.data, 'log-stream');
+      }
+    };
+    es.onerror = () => { sseState.textContent = 'disconnected'; sseState.style.color='#ff6b6b'; };
+
+    // AF launcher functions
+    async function launchAF(mode) {
+      appendLog(`Launching AF (${mode})`, 'log-af');
+      try {
+        const res = await fetch('/autofocus/launch', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({
+            mode: mode,
+            step_size: 500,
+            rpm: 16,
+            visualize: false,
+            verify_frames: 7,
+            sleep_after_move: 0.12,
+            fallback_granularity: 8
+          })
+        });
+        const j = await res.json();
+        if (!j.ok) { appendLog('AF launch error: ' + (j.error || JSON.stringify(j)), 'log-af'); return; }
+        appendLog('AF launched pid=' + (j.pid || '?'), 'log-af');
+        updateAFStatus();
+        updateSerialState();
+      } catch (e) { appendLog('AF launch failed: ' + e, 'log-af'); }
+    }
+    async function stopAF() {
+      appendLog('Stopping AF...', 'log-af');
+      try {
+        const res = await fetch('/autofocus/stop', {method:'POST'});
+        const j = await res.json();
+        if (!j.ok) appendLog('AF stop error: ' + (j.error||JSON.stringify(j)), 'log-af');
+        else appendLog('AF stopped', 'log-af');
+        updateAFStatus();
+        updateSerialState();
+        setTimeout(updateCamBtn, 250);
+      } catch (e) { appendLog('AF stop failed: ' + e, 'log-af'); }
+    }
+    async function updateAFStatus() {
+      try {
+        const res = await fetch('/autofocus/status');
+        const j = await res.json();
+        if (j.running) { afStatusEl.textContent = 'running (pid '+j.pid+')'; afStatusEl.style.color='#3ddc84'; }
+        else { afStatusEl.textContent = 'idle'; afStatusEl.style.color='#9aa'; }
+        // show serial/camera pause info
+        serialState.textContent = j.serial_paused_for_af ? 'paused for AF' : 'active';
+        serialState.style.color = j.serial_paused_for_af ? '#f0a500' : '#3ddc84';
+      } catch(e) { afStatusEl.textContent='error'; afStatusEl.style.color='#ff6b6b'; }
+    }
+    async function updateSerialState() {
+      try {
+        const res = await fetch('/autofocus/status'); const j = await res.json();
+        serialState.textContent = j.serial_paused_for_af ? 'paused for AF' : 'active';
+        serialState.style.color = j.serial_paused_for_af ? '#f0a500' : '#3ddc84';
+      } catch(e) { serialState.textContent='unknown'; serialState.style.color='#9aa'; }
+    }
+
+    afCoarseBtn.addEventListener('click', ()=>launchAF('coarse'));
+    afMediumBtn.addEventListener('click', ()=>launchAF('medium'));
+    afFineBtn.addEventListener('click', ()=>launchAF('fine'));
+    afStopBtn.addEventListener('click', stopAF);
+    setInterval(updateAFStatus, 2000);
+
+    // objective apply
+    applyObjectiveBtn.addEventListener('click', async () => {
+      const obj = objectiveSelect.value;
+      appendLog(`Applying objective ${obj}x`, 'log-stream');
+      try {
+        const res = await fetch('/camera/objective', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({objective: obj})
+        });
+        const j = await res.json();
+        if (!j.ok) { appendLog('Objective error: '+(j.error||JSON.stringify(j)),'log-af'); return; }
+        currentObjective.textContent = j.objective || `${obj}x`;
+        currentExposure.textContent = (j.exposure == null) ? '-' : j.exposure;
+        currentGain.textContent = (j.gain == null) ? '-' : j.gain;
+        appendLog(`Objective ${currentObjective.textContent} applied (serial: ${j.serial_sent})`, 'log-stream');
+        setTimeout(updateCamBtn, 200);
+      } catch (e) { appendLog('Objective set error: ' + e, 'log-af'); }
+    });
+
+    // focus input initially
+    cmdInput.focus();
+  </script>
+</body>
+</html>
