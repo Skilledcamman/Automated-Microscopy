@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Microscope Panel</title>
+  <!doctype html>
+  <html>
+  <head>
+    <meta charset="utf-8"/>
+    <title>Microscope Panel</title>
+    <link rel="stylesheet" href="/static/css/style.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Microscope Control</h1>
+      <div class="meta status"></div>
+    </header>
+
+    <div class="layout">
+      <div class="left">
+        <section>
+          <div class="camera-card">
+            <h3 style="margin-top:0">Camera</h3>
+            <img id="videoImg" alt="Live camera feed" src="/video" />
+            <div class="objective-row">
+              <label for="objectiveSelect" style="color:#9aa">Objective:</label>
+              <select id="objectiveSelect">
+                <option value="4">4x</option>
+                <option value="10">10x</option>
+                <option value="40">40x</option>
+              </select>
+              <button id="applyObjectiveBtn">Apply</button>
+            </div>
+          </div>
+
+          <details open class="af-section" style="margin-top:12px;">
+            <summary>Autofocus</summary>
+            <div class="af-controls">
+              <label for="afModeSelect" style="font-size:1.05rem; color:#cfcfd2;">Autofocus mode:</label>
+              <select id="afModeSelect" style="min-width:140px;">
+                <option value="coarse">Coarse</option>
+                <option value="medium">Medium</option>
+                <option value="fine">Fine</option>
+              </select>
+              <button id="afRunBtn">Run AF</button>
+              <button id="afStopBtn">Stop AF</button>
+            </div>
+            <div style="margin-top:8px; font-size:.95rem; color:#9aa">
+              AF status: <span id="afStatus">idle</span>
+              <br/>
+              Last AF position: <span id="afLastPos">-</span>
+            </div>
+          </details>
+
+          <section style="margin-top:10px">
+            <details open class="z-section">
+              <summary>Z Axis Control</summary>
+              <div class="z-controls">
+              <div class="step-sizes">
+                <button class="stepBtn" data-step="50">50</button>
+                <button class="stepBtn" data-step="100">100</button>
+                <button class="stepBtn" data-step="250">250</button>
+                <button class="stepBtn" data-step="500">500</button>
+                <button class="stepBtn" data-step="1000">1000</button>
+              </div>
+              <div class="small" style="display:flex; align-items:center; gap:.6rem;">
+                <span>speed:</span>
+                <input type="range" id="rpmSlider" min="6" max="100" step="1" value="6" style="width:200px;"/>
+                <span id="rpmPercent">6%</span>
+                <span id="rpmValue" title="mapped RPM">(RPM 1)</span>
+              </div>
+              <div class="z-vertical">
+                <button id="zUpBtn" class="arrow-btn" title="Step Up"><img src="/static/icons/up.svg" alt="Up" class="arrow-icon"/></button>
+                <button id="homeBtn" class="home-btn" title="Hard home (Z)"><img src="/static/icons/home.svg" alt="Home" class="home-icon"/></button>
+                <button id="zDownBtn" class="arrow-btn" title="Step Down"><img src="/static/icons/down.svg" alt="Down" class="arrow-icon"/></button>
+              </div>
+              <div class="z-row" style="margin-top:8px; display:flex; gap:.5rem; align-items:center;">
+                <button id="releaseBtn" title="Release coils (R)">Motor Off</button>
+              </div>
+              </div>
+              <div class="go-row">
+                <input id="goInput" type="number" placeholder="Go to position (steps)" style="flex:0 1 220px;"/>
+                <button id="goBtn">Go</button>
+              </div>
+            </details>
+          </section>
+        </section>
+      </div>
+
+      <div class="right">
+        <section style="margin-top:0">
+          <details open class="console-section">
+            <summary>Console</summary>
+            <div class="console-card">
+              <div id="log" aria-live="polite"></div>
+              <div class="controls console-controls" style="gap:.5rem; align-items:center;">
+                <input id="cmdInput" type="text" placeholder="Type a command (e.g., Z, O40, G100, ?)" autocomplete="off"/>
+                <button id="sendBtn">Send</button>
+                <button id="clearBtn" title="Clear output">Clear</button>
+              </div>
+              <div class="small" style="margin-top:.4rem; color:#9aa; display:flex; gap:1rem; flex-wrap:wrap;">
+              </div>
+            </div>
+          </details>
+        </section>
+
+        <script>
+            const cmdInput = document.getElementById('cmdInput');
+            const sendBtn = document.getElementById('sendBtn');
+            const clearBtn = document.getElementById('clearBtn');
+            // removed help/autoscroll controls
+            const logEl = document.getElementById('log');
+            const afRunBtn = document.getElementById('afRunBtn');
+            const afStopBtn = document.getElementById('afStopBtn');
+            const homeBtn = document.getElementById('homeBtn');
+            // Objective selection elements
+            const objectiveSelect = document.getElementById('objectiveSelect');
+            const applyObjectiveBtn = document.getElementById('applyObjectiveBtn');
+            const zUpBtn = document.getElementById('zUpBtn');
+            const zDownBtn = document.getElementById('zDownBtn');
+            const stepButtons = Array.from(document.querySelectorAll('.stepBtn'));
+            let currentStepSize = 100;
+            const rpmSlider = document.getElementById('rpmSlider');
+            const rpmPercent = document.getElementById('rpmPercent');
+            const rpmValue = document.getElementById('rpmValue');
+            const goInput = document.getElementById('goInput');
+            const goBtn = document.getElementById('goBtn');
+
+            // Console: robust output appender with trimming and autoscroll
+            function appendLog(msg, cls='log-serial') {
+              const d = document.createElement('div');
+              d.className = 'log-line ' + cls;
+              d.textContent = (msg && msg.length ? msg : '(no output)');
+              logEl.appendChild(d);
+              const maxLines = 600;
+              const excess = logEl.childElementCount - maxLines;
+              if (excess > 0) {
+                for (let i = 0; i < excess; i++) {
+                  if (logEl.firstChild) logEl.removeChild(logEl.firstChild);
+                }
+              }
+              // Always autoscroll
+              logEl.scrollTop = logEl.scrollHeight;
+            }
+
+            // Input history
+            const history = [];
+            let histIdx = -1;
+            function pushHistory(cmd){
+              if (!cmd) return;
+              if (history.length === 0 || history[history.length-1] !== cmd) history.push(cmd);
+              histIdx = history.length; // reset to end
+            }
+            function historyUp(){
+              if (!history.length) return;
+              histIdx = Math.max(0, histIdx-1);
+              cmdInput.value = history[histIdx];
+            }
+            function historyDown(){
+              if (!history.length) return;
+              histIdx = Math.min(history.length, histIdx+1);
+              cmdInput.value = (histIdx >= history.length) ? '' : history[histIdx];
+            }
+
+            // A fresh, robust console implementation
+            let sending = false;
+            async function postCmd(raw){
+              try {
+                const res = await fetch('/console', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ cmd: raw }) });
+                const ct = res.headers.get('content-type')||'';
+                let out = '';
+                if (ct.includes('application/json')){
+                  const j = await res.json();
+                  if (!j.ok) { appendLog('ERROR: '+(j.error||''),'log-af'); return ''; }
+                  out = (j.output||'');
+                } else {
+                  out = await res.text();
+                }
+                return out;
+              } catch(e){ appendLog('ERROR: '+e,'log-af'); return ''; }
+            }
+
+            async function sendConsole(){
+              if (sending) return; // simple rate-limit
+              const cmd = cmdInput.value.trim();
+              if (!cmd) return;
+              sending = true;
+              sendBtn.disabled = true;
+              appendLog('> '+cmd, 'log-stream');
+              pushHistory(cmd);
+              if (cmd === '?'){
+                // Fetch help until end marker or no change
+                const doneRegex = /E\s*-\s*force write current_pos to EEPROM now/i;
+                let last = '';
+                for (let i=0; i<80; i++){
+                  const out = await postCmd('?');
+                  const t = (out||'').trim();
+                  if (!t) break;
+                  if (t === last) break;
+                  appendLog(out, 'log-serial');
+                  if (doneRegex.test(out)) break;
+                  last = t;
+                  await new Promise(r=> setTimeout(r, 150));
+                }
+              } else {
+                const out = await postCmd(cmd);
+                if (out) appendLog(out, 'log-serial');
+              }
+              sending = false;
+              sendBtn.disabled = false;
+            }
+
+            // Wire buttons
+            sendBtn.onclick = () => { sendConsole(); cmdInput.value=''; cmdInput.focus(); };
+            clearBtn.onclick = () => { logEl.textContent=''; cmdInput.focus(); };
+            // help button removed
+
+            // Enter to send; Shift+Enter for newline; history nav with Up/Down
+            cmdInput.addEventListener('keydown', (ev)=>{
+              if (ev.key === 'Enter'){
+                if (ev.shiftKey){
+                  // allow newline
+                } else {
+                  ev.preventDefault();
+                  sendConsole().then(()=>{ cmdInput.value=''; });
+                }
+              } else if (ev.key === 'ArrowUp'){
+                ev.preventDefault(); historyUp();
+              } else if (ev.key === 'ArrowDown'){
+                ev.preventDefault(); historyDown();
+              }
+            });
+
+            // Passive drain of serial output so ALL prints appear in console
+            async function drainSerial(){
+              try {
+                const res = await fetch('/console/drain');
+                const j = await res.json();
+                if (j.ok && j.output && j.output.trim()) appendLog(j.output, 'log-serial');
+              } catch(e) { /* ignore drain errors */ }
+            }
+            setInterval(drainSerial, 350);
+
+            // Removed periodic drain to avoid backend 400s on empty commands
+
+            function setStepSize(n){
+              currentStepSize = n;
+              stepButtons.forEach(b=>{
+                if (parseInt(b.dataset.step,10) === n) b.classList.add('active');
+                else b.classList.remove('active');
+              });
+            }
+            stepButtons.forEach(b=> b.addEventListener('click', ()=> setStepSize(parseInt(b.dataset.step,10))));
+            setStepSize(currentStepSize);
+
+            zUpBtn.onclick = async ()=>{ try{ await fetch('/move',{method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({steps: +currentStepSize})}); }catch(e){} };
+            zDownBtn.onclick = async ()=>{ try{ await fetch('/move',{method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({steps: -currentStepSize})}); }catch(e){} };
+            homeBtn.onclick = async ()=>{ try{ await fetch('/home',{method:'POST'}); }catch(e){} };
+
+            afRunBtn.onclick = async ()=>{
+              const level = (document.getElementById('afModeSelect').value||'coarse');
+              try{ const r = await fetch('/autofocus',{method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({level})}); const j = await r.json(); appendLog(JSON.stringify(j),'log-af'); }catch(e){ appendLog('AF err: '+e,'log-af'); }
+            };
+            afStopBtn.onclick = async ()=>{ /* optional stop endpoint if implemented */ };
+
+            async function applyObjective(obj){
+              try {
+                const res = await fetch('/objective', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({objective: obj}) });
+                const data = await res.json();
+                if (!data.ok) appendLog('Objective error: '+(data.error||''),'log-af');
+              } catch(e){ appendLog('Objective set error: '+e,'log-af'); }
+            }
+            // Auto-apply on change
+            if (objectiveSelect) objectiveSelect.addEventListener('change', ()=> applyObjective(objectiveSelect.value));
+            // Keep manual Apply button
+            if (applyObjectiveBtn) applyObjectiveBtn.onclick = ()=> applyObjective(objectiveSelect.value);
+
+            // RPM slider wiring: map 0-100% to RPM 0-16 and send V<rpm> via /console
+            function percentToRpm(p){
+              const clamped = Math.max(6, Math.min(100, parseInt(p,10)||0));
+              const rpm = Math.round(clamped * 16 / 100);
+              return Math.max(1, rpm);
+            }
+            function updateRpmUI(){
+              const p = parseInt(rpmSlider.value,10)||0;
+              const rpm = percentToRpm(p);
+              rpmPercent.textContent = `${p}%`;
+              rpmValue.textContent = `(RPM ${rpm})`;
+            }
+            async function applyRPM(){
+              updateRpmUI();
+              const p = parseInt(rpmSlider.value,10)||0;
+              const rpm = percentToRpm(p);
+              try { await fetch('/console', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ cmd: `V${rpm}` }) }); } catch(_){}
+            }
+            if (rpmSlider){ rpmSlider.addEventListener('input', updateRpmUI); rpmSlider.addEventListener('change', applyRPM); updateRpmUI(); }
+
+            // Go to absolute position: query current via Q, compute delta, call /move
+            if (goBtn){
+              goBtn.addEventListener('click', async ()=>{
+                const target = parseInt(goInput.value,10);
+                if (!Number.isFinite(target) || target < 0){ appendLog('Enter a non-negative target position','log-af'); return; }
+                try {
+                  const r = await fetch('/console', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ cmd: 'Q' }) });
+                  const j = await r.json();
+                  const txt = (j.output||'').toString();
+                  const m = txt.match(/Position:\s*(\d+)/i);
+                  if (!m){ appendLog('Could not read position from Q','log-af'); return; }
+                  const pos = parseInt(m[1],10);
+                  const delta = target - pos;
+                  if (delta === 0){ appendLog('Already at requested position','log-stream'); return; }
+                  await fetch('/move', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ steps: delta }) });
+                } catch(e){ appendLog('Go error: '+e, 'log-af'); }
+              });
+            }
+
+            cmdInput.focus();
+          </script>
