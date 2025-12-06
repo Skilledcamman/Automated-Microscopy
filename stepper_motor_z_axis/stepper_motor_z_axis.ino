@@ -1,122 +1,3 @@
-// I2C support for Raspberry Pi host
-#include <Wire.h>
-
-// Opcodes
-#define I2C_ADDR 0x12
-
-// Opcodes
-#define OP_HOME          0x01
-#define OP_QUERY         0x02
-#define OP_STEP_UP       0x03
-#define OP_STEP_DOWN     0x04
-#define OP_MOVE_STEPS    0x05
-#define OP_SET_POS       0x06
-#define OP_SET_OBJECTIVE 0x07
-#define OP_SET_RPM       0x08
-#define OP_EEPROM_WRITE  0x09
-
-volatile uint8_t rxBuf[16];
-volatile uint8_t rxLen = 0;
-volatile uint8_t rxOp = 0;
-
-// I2C helper functions mapping to existing serial-controlled logic
-void doHome(int raiseSteps);
-long getPosition();
-long getMaxLimit();
-void moveSteps(long steps);
-void setPosition(long pos);
-void setObjective(uint8_t code);
-void setRPM(uint8_t rpm);
-void eepromWritePos();
-bool isHomed();
-
-// I2C receive: [opcode][len][payload...]
-void onI2CReceive(int count){
-  if (count <= 0) return;
-  rxOp = Wire.read();
-  rxLen = Wire.read();
-  for (uint8_t i=0; i<rxLen && Wire.available(); i++){
-    rxBuf[i] = Wire.read();
-  }
-  // Execute immediately; prepare any response in global state
-  switch(rxOp){
-    case OP_HOME: {
-      int16_t raiseSteps = (int16_t)(rxBuf[0] | (rxBuf[1]<<8));
-      doHome(raiseSteps);
-      break;
-    }
-    case OP_QUERY: {
-      // no action; response will be sent in onRequest
-      break;
-    }
-    case OP_STEP_UP: {
-      int16_t s = (int16_t)(rxBuf[0] | (rxBuf[1]<<8));
-      moveSteps(s);
-      break;
-    }
-    case OP_STEP_DOWN: {
-      int16_t s = (int16_t)(rxBuf[0] | (rxBuf[1]<<8));
-      moveSteps(-s);
-      break;
-    }
-    case OP_MOVE_STEPS: {
-      long s = (long)( (uint32_t)rxBuf[0] | ((uint32_t)rxBuf[1]<<8) | ((uint32_t)rxBuf[2]<<16) | ((uint32_t)rxBuf[3]<<24) );
-      moveSteps(s);
-      break;
-    }
-    case OP_SET_POS: {
-      long p = (long)( (uint32_t)rxBuf[0] | ((uint32_t)rxBuf[1]<<8) | ((uint32_t)rxBuf[2]<<16) | ((uint32_t)rxBuf[3]<<24) );
-      setPosition(p);
-      break;
-    }
-    case OP_SET_OBJECTIVE: {
-      uint8_t code = rxBuf[0];
-      setObjective(code);
-      break;
-    }
-    case OP_SET_RPM: {
-      uint8_t rpm = rxBuf[0];
-      setRPM(rpm);
-      break;
-    }
-    case OP_EEPROM_WRITE: {
-      eepromWritePos();
-      break;
-    }
-    default: break;
-  }
-}
-
-// I2C response: [status][len][payload]
-void onI2CRequest(){
-  uint8_t status = 0;
-  uint8_t payload[10];
-  uint8_t len = 0;
-  if (rxOp == OP_QUERY){
-    // Example payload: [objective:u8][homed:u8][pos:i32][limit:i32]
-    uint8_t obj = 0; // map your current objective (4x/10x/40x) to 0/1/2
-    // TODO: replace with actual objective mapping
-    uint8_t homed = isHomed() ? 1 : 0;
-    long pos = getPosition();
-    long limit = getMaxLimit();
-    payload[0] = obj;
-    payload[1] = homed;
-    payload[2] = (uint8_t)(pos & 0xFF);
-    payload[3] = (uint8_t)((pos>>8) & 0xFF);
-    payload[4] = (uint8_t)((pos>>16) & 0xFF);
-    payload[5] = (uint8_t)((pos>>24) & 0xFF);
-    payload[6] = (uint8_t)(limit & 0xFF);
-    payload[7] = (uint8_t)((limit>>8) & 0xFF);
-    payload[8] = (uint8_t)((limit>>16) & 0xFF);
-    payload[9] = (uint8_t)((limit>>24) & 0xFF);
-    len = 10;
-  }
-  Wire.write(status);
-  Wire.write(len);
-  for (uint8_t i=0; i<len; i++) Wire.write(payload[i]);
-}
-
-// NOTE: Wire.begin and handlers are initialized in the main setup() below
 /*
 Serial-controlled ULN2003 + 28BYJ-48 using the Arduino Stepper library
 Extended:
@@ -135,6 +16,7 @@ Behavior change requested:
 */
 
 #include <Stepper.h>
+#include <Arduino.h>
 #include <EEPROM.h>
 
 // Number of steps per revolution of your motor (common for 28BYJ-48 half-step)
@@ -347,11 +229,6 @@ void setup() {
   Serial.print(F("Current objective (loaded/persisted): ")); Serial.print(current_objective); Serial.print(F("x  max_limit=")); Serial.println(current_max_limit);
   Serial.println(F("Run Z or Z<n> to perform hard home and set position 0."));
   print_help();
-
-  // Initialize I2C interface and register handlers
-  Wire.begin(I2C_ADDR);
-  Wire.onReceive(onI2CReceive);
-  Wire.onRequest(onI2CRequest);
 }
 
 void loop() {
@@ -533,77 +410,3 @@ void loop() {
     print_help();
   }
 }
-
-// ===== I2C helper implementations mapped to existing state/behavior =====
-extern int currentRPM;
-extern long current_pos;
-extern bool is_homed;
-extern long current_max_limit;
-extern int current_objective;
-extern const long LIMIT_4X;
-extern const long LIMIT_10X;
-extern const long LIMIT_40X;
-extern const bool ENABLE_EEPROM_PERSISTENCE;
-extern const int EEPROM_ADDR_POS;
-extern const int EEPROM_ADDR_OBJ;
-extern Stepper myStepper;
-
-void doHome(int raiseSteps){
-  if (raiseSteps < 0) raiseSteps = 0;
-  perform_hard_home(raiseSteps);
-}
-
-long getPosition(){
-  return is_homed ? current_pos : -1;
-}
-
-long getMaxLimit(){
-  return current_max_limit;
-}
-
-void moveSteps(long steps){
-  // Reuse step_and_update which enforces homing and limits
-  step_and_update(steps);
-}
-
-void setPosition(long pos){
-  if (pos < 0) pos = 0;
-  current_pos = pos;
-  if (ENABLE_EEPROM_PERSISTENCE) {
-    EEPROM.put(EEPROM_ADDR_POS, current_pos);
-  }
-}
-
-void setObjective(uint8_t code){
-  // code: 0->4x, 1->10x, 2->40x
-  if (code == 0){
-    current_objective = 4;
-    current_max_limit = LIMIT_4X;
-  } else if (code == 1){
-    current_objective = 10;
-    current_max_limit = LIMIT_10X;
-  } else if (code == 2){
-    current_objective = 40;
-    current_max_limit = LIMIT_40X;
-  }
-  if (ENABLE_EEPROM_PERSISTENCE) {
-    EEPROM.put(EEPROM_ADDR_OBJ, current_objective);
-  }
-}
-
-void setRPM(uint8_t rpm){
-  if (rpm == 0) rpm = 1;
-  currentRPM = rpm;
-  myStepper.setSpeed(currentRPM);
-}
-
-void eepromWritePos(){
-  persist_position_now();
-}
-
-bool isHomed(){
-  return is_homed;
-}
-
-// Update the I2C query response to reflect current objective mapping
-// This function is already using current state in onI2CRequest()
