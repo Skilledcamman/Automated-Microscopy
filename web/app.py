@@ -15,10 +15,10 @@ from collections import deque
 
 app = Flask(__name__)
 
-# Shared resources
-SERIAL_PORT = "COM9"
-BAUD = 115200
-CAMERA_INDEX = 0
+# Shared resources (defaults overridden for Raspberry Pi)
+SERIAL_PORT = os.environ.get("AM_SERIAL_PORT", "COM9")
+BAUD = int(os.environ.get("AM_BAUD", "115200"))
+CAMERA_INDEX = int(os.environ.get("AM_CAMERA_INDEX", "0"))
 CURRENT_OBJECTIVE = "40"  # default objective
 shared_serial: Optional[ZAxisController] = None
 shared_cap: Optional[cv2.VideoCapture] = None
@@ -41,7 +41,16 @@ def _buffer_lines(lines):
 def init_serial() -> ZAxisController:
     global shared_serial
     if shared_serial is None:
-        shared_serial = ZAxisController(SERIAL_PORT, BAUD)
+        # Detect Raspberry Pi and default to primary UART
+        if sys.platform.startswith("linux") and os.uname().machine.startswith("aarch64"):
+            # Pi 5 defaults: PL011 on /dev/ttyAMA0, use 9600 to match Arduino SoftwareSerial
+            default_port = "/dev/ttyAMA0"
+            port = os.environ.get("AM_SERIAL_PORT", default_port)
+            baud = int(os.environ.get("AM_BAUD", "9600"))
+        else:
+            port = SERIAL_PORT
+            baud = BAUD
+        shared_serial = ZAxisController(port, baud)
         shared_serial.open()
     return shared_serial
 
@@ -49,8 +58,12 @@ def init_serial() -> ZAxisController:
 def init_camera(objective: str = "40") -> cv2.VideoCapture:
     global shared_cap
     if shared_cap is None:
-        cap = cv2.VideoCapture(CAMERA_INDEX, cv2.CAP_DSHOW)
-        if not cap.isOpened():
+        # On Windows use DSHOW; on Pi/Linux use default (V4L2)
+        if sys.platform.startswith("win"):
+            cap = cv2.VideoCapture(CAMERA_INDEX, cv2.CAP_DSHOW)
+            if not cap.isOpened():
+                cap = cv2.VideoCapture(CAMERA_INDEX)
+        else:
             cap = cv2.VideoCapture(CAMERA_INDEX)
         if not cap.isOpened():
             raise RuntimeError("Unable to open camera")

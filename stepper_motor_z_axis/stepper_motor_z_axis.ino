@@ -18,6 +18,7 @@ Behavior change requested:
 #include <Stepper.h>
 #include <Arduino.h>
 #include <EEPROM.h>
+#include <SoftwareSerial.h>
 
 // Number of steps per revolution of your motor (common for 28BYJ-48 half-step)
 const int stepsPerRevolution = 2048;
@@ -30,6 +31,12 @@ const int PIN_IN4 = 11;
 
 // Create Stepper instance
 Stepper myStepper = Stepper(stepsPerRevolution, PIN_IN1, PIN_IN2, PIN_IN3, PIN_IN4);
+
+// SoftwareSerial for external UART on dedicated pins
+// Adjust these pins to your wiring if needed
+const uint8_t UART_RX_PIN = 2; // connect to external TX
+const uint8_t UART_TX_PIN = 3; // connect to external RX
+SoftwareSerial serialPort(UART_RX_PIN, UART_TX_PIN); // RX, TX
 
 // Behaviour defaults
 int STEPS_PER_PRESS = 8;    // default steps per single U/D press (changeable via 'S' command)
@@ -69,24 +76,24 @@ const int HOME_RPM = 16; // use faster speed for homing push
 
 // Print help text
 void print_help() {
-  Serial.println(F("Commands:"));
-  Serial.println(F("  Z<n>     - HARD HOME: push to end stop (ignore limits), then optionally raise by <n> steps and set pos=0"));
-  Serial.println(F("             Z without parameter will push to the stop and set pos=0 (no raise)."));
-  Serial.println(F("  Q        - query current objective and homing/state info"));
-  Serial.println(F("  ?        - help"));
-  Serial.println(F(""));
-  Serial.println(F("After homing is performed (Z), these additional commands are enabled:"));
-  Serial.println(F("  U        - step UP by STEPS_PER_PRESS"));
-  Serial.println(F("  D        - step DOWN by STEPS_PER_PRESS"));
-  Serial.println(F("  G<n>     - move exactly <n> steps (signed). e.g. G100 or G-100"));
-  Serial.println(F("  H<n>     - set internal position counter to <n> (no movement)"));
-  Serial.println(F("  E        - force write current_pos to EEPROM now"));
-  Serial.println(F(""));
-  Serial.println(F("Other config commands available anytime:"));
-  Serial.println(F("  V<n>     - set RPM (e.g. V8 -> 8 RPM)"));
-  Serial.println(F("  S<n>     - set STEPS_PER_PRESS (e.g. S16)"));
-  Serial.println(F("  O<n>     - select objective (O4, O10 or O40) and apply its max limit"));
-  Serial.println(F("  M<n>     - set custom max limit (steps) directly, e.g. M9000"));
+  serialPort.println(F("Commands:"));
+  serialPort.println(F("  Z<n>     - HARD HOME: push to end stop (ignore limits), then optionally raise by <n> steps and set pos=0"));
+  serialPort.println(F("             Z without parameter will push to the stop and set pos=0 (no raise)."));
+  serialPort.println(F("  Q        - query current objective and homing/state info"));
+  serialPort.println(F("  ?        - help"));
+  serialPort.println(F(""));
+  serialPort.println(F("After homing is performed (Z), these additional commands are enabled:"));
+  serialPort.println(F("  U        - step UP by STEPS_PER_PRESS"));
+  serialPort.println(F("  D        - step DOWN by STEPS_PER_PRESS"));
+  serialPort.println(F("  G<n>     - move exactly <n> steps (signed). e.g. G100 or G-100"));
+  serialPort.println(F("  H<n>     - set internal position counter to <n> (no movement)"));
+  serialPort.println(F("  E        - force write current_pos to EEPROM now"));
+  serialPort.println(F(""));
+  serialPort.println(F("Other config commands available anytime:"));
+  serialPort.println(F("  V<n>     - set RPM (e.g. V8 -> 8 RPM)"));
+  serialPort.println(F("  S<n>     - set STEPS_PER_PRESS (e.g. S16)"));
+  serialPort.println(F("  O<n>     - select objective (O4, O10 or O40) and apply its max limit"));
+  serialPort.println(F("  M<n>     - set custom max limit (steps) directly, e.g. M9000"));
 }
 
 // Release coils (de-energize)
@@ -101,7 +108,7 @@ void release_coils() {
 // Also requires homing before moving.
 void step_and_update(long steps) {
   if (!is_homed) {
-    Serial.println(F("Error: system not homed. Run Z command to perform hard home first."));
+    serialPort.println(F("Error: system not homed. Run Z command to perform hard home first."));
     return;
   }
   long target = current_pos + steps;
@@ -109,7 +116,7 @@ void step_and_update(long steps) {
   if (target > current_max_limit) target = current_max_limit;
   long actual = target - current_pos;
   if (actual == 0) {
-    Serial.println(F("Limit reached; no movement."));
+    serialPort.println(F("Limit reached; no movement."));
     return;
   }
   // myStepper.step expects an int; cast is safe for typical travel sizes
@@ -122,8 +129,8 @@ void step_and_update(long steps) {
     if (eeprom_write_counter >= EEPROM_WRITE_INTERVAL) {
       EEPROM.put(EEPROM_ADDR_POS, current_pos);
       eeprom_write_counter = 0;
-      Serial.print(F("Position persisted to EEPROM: "));
-      Serial.println(current_pos);
+      serialPort.print(F("Position persisted to EEPROM: "));
+      serialPort.println(current_pos);
     }
   }
 }
@@ -131,13 +138,13 @@ void step_and_update(long steps) {
 // Helper to persist position immediately (only allowed when homed)
 void persist_position_now() {
   if (!is_homed) {
-    Serial.println(F("Error: cannot persist position before homing."));
+    serialPort.println(F("Error: cannot persist position before homing."));
     return;
   }
   EEPROM.put(EEPROM_ADDR_POS, current_pos);
   eeprom_write_counter = 0;
-  Serial.print(F("Position persisted to EEPROM now: "));
-  Serial.println(current_pos);
+  serialPort.print(F("Position persisted to EEPROM now: "));
+  serialPort.println(current_pos);
 }
 
 /*
@@ -150,7 +157,7 @@ void persist_position_now() {
  After this routine completes the system is marked homed (is_homed=true) and position defined.
 */
 void perform_hard_home(int raise_steps) {
-  Serial.println(F("HOMING: pushing to end stop (ignoring soft limits) ..."));
+  serialPort.println(F("HOMING: pushing to end stop (ignoring soft limits) ..."));
 
   // Save previous speed and set homing speed
   int prevSpeed = currentRPM;
@@ -165,13 +172,13 @@ void perform_hard_home(int raise_steps) {
 
   // If caller requested a positive raise, perform it. Otherwise, stay at the stop.
   if (raise_steps > 0) {
-    Serial.print(F("HOMING: raising back up by "));
-    Serial.print(raise_steps);
-    Serial.println(F(" steps (off the stop) ..."));
+    serialPort.print(F("HOMING: raising back up by "));
+    serialPort.print(raise_steps);
+    serialPort.println(F(" steps (off the stop) ..."));
     myStepper.step((int)raise_steps);
     delay(60);
   } else {
-    Serial.println(F("HOMING: no raise requested; position 0 is the physical stop."));
+    serialPort.println(F("HOMING: no raise requested; position 0 is the physical stop."));
   }
 
   // Restore previous speed
@@ -183,18 +190,17 @@ void perform_hard_home(int raise_steps) {
   if (ENABLE_EEPROM_PERSISTENCE) {
     EEPROM.put(EEPROM_ADDR_POS, current_pos);
     eeprom_write_counter = 0;
-    Serial.print(F("Internal position counter set to: "));
-    Serial.println(current_pos);
-    Serial.println(F("Position persisted to EEPROM now."));
+    serialPort.print(F("Internal position counter set to: "));
+    serialPort.println(current_pos);
+    serialPort.println(F("Position persisted to EEPROM now."));
   } else {
-    Serial.print(F("Internal position counter set to: "));
-    Serial.println(current_pos);
+    serialPort.print(F("Internal position counter set to: "));
+    serialPort.println(current_pos);
   }
 }
 
 void setup() {
-  Serial.begin(115200);
-  while (!Serial) { ; } // wait for Serial on some boards
+  serialPort.begin(9600);
 
   // Set initial speed
   myStepper.setSpeed(currentRPM);
@@ -222,18 +228,18 @@ void setup() {
   current_pos = -1;
   is_homed = false;
 
-  Serial.println(F("Stepper serial control ready. SYSTEM UNHOMED - homing required on each boot."));
-  Serial.print(F("Default STEPS_PER_PRESS=")); Serial.println(STEPS_PER_PRESS);
-  Serial.print(F("Default RPM=")); Serial.println(currentRPM);
-  Serial.print(F("Home RPM=")); Serial.println(HOME_RPM);
-  Serial.print(F("Current objective (loaded/persisted): ")); Serial.print(current_objective); Serial.print(F("x  max_limit=")); Serial.println(current_max_limit);
-  Serial.println(F("Run Z or Z<n> to perform hard home and set position 0."));
+  serialPort.println(F("Stepper serial control ready (SoftwareSerial @9600). SYSTEM UNHOMED - homing required on each boot."));
+  serialPort.print(F("Default STEPS_PER_PRESS=")); serialPort.println(STEPS_PER_PRESS);
+  serialPort.print(F("Default RPM=")); serialPort.println(currentRPM);
+  serialPort.print(F("Home RPM=")); serialPort.println(HOME_RPM);
+  serialPort.print(F("Current objective (loaded/persisted): ")); serialPort.print(current_objective); serialPort.print(F("x  max_limit=")); serialPort.println(current_max_limit);
+  serialPort.println(F("Run Z or Z<n> to perform hard home and set position 0."));
   print_help();
 }
 
 void loop() {
-  if (!Serial.available()) return;
-  String cmd = Serial.readStringUntil('\n');
+  if (!serialPort.available()) return;
+  String cmd = serialPort.readStringUntil('\n');
   cmd.trim();
   if (cmd.length() == 0) return;
 
@@ -250,7 +256,7 @@ void loop() {
       if (r >= 0) raise = r;
     }
     perform_hard_home(raise);
-    Serial.println(F("Homing complete."));
+    serialPort.println(F("Homing complete."));
     return;
   } else if (c == '?') {
     print_help();
@@ -267,9 +273,9 @@ void loop() {
       if (v > 0) {
         currentRPM = v;
         myStepper.setSpeed(currentRPM);
-        Serial.print(F("Speed set to ")); Serial.print(currentRPM); Serial.println(F(" RPM"));
-      } else Serial.println(F("Invalid RPM value."));
-    } else Serial.println(F("Usage: V<n> e.g. V8"));
+        serialPort.print(F("Speed set to ")); serialPort.print(currentRPM); serialPort.println(F(" RPM"));
+      } else serialPort.println(F("Invalid RPM value."));
+    } else serialPort.println(F("Usage: V<n> e.g. V8"));
     return;
   } else if (c == 'S') {
     // set STEPS_PER_PRESS: format S<n>
@@ -279,9 +285,9 @@ void loop() {
       int s = num.toInt();
       if (s > 0) {
         STEPS_PER_PRESS = s;
-        Serial.print(F("STEPS_PER_PRESS set to ")); Serial.println(STEPS_PER_PRESS);
-      } else Serial.println(F("Invalid steps value."));
-    } else Serial.println(F("Usage: S<n> e.g. S16"));
+        serialPort.print(F("STEPS_PER_PRESS set to ")); serialPort.println(STEPS_PER_PRESS);
+      } else serialPort.println(F("Invalid steps value."));
+    } else serialPort.println(F("Usage: S<n> e.g. S16"));
     return;
   } else if (c == 'O') {
     // select objective: O4, O10, O40
@@ -292,25 +298,25 @@ void loop() {
       if (obj == 4) {
         current_objective = 4;
         current_max_limit = LIMIT_4X;
-        Serial.println(F("Objective set to 4x."));
+        serialPort.println(F("Objective set to 4x."));
       } else if (obj == 10) {
         current_objective = 10;
         current_max_limit = LIMIT_10X;
-        Serial.println(F("Objective set to 10x."));
+        serialPort.println(F("Objective set to 10x."));
       } else if (obj == 40) {
         current_objective = 40;
         current_max_limit = LIMIT_40X;
-        Serial.println(F("Objective set to 40x."));
+        serialPort.println(F("Objective set to 40x."));
       } else {
-        Serial.println(F("Unknown objective. Use O4, O10 or O40."));
+        serialPort.println(F("Unknown objective. Use O4, O10 or O40."));
       }
-      Serial.print(F("Current max limit is: ")); Serial.println(current_max_limit);
+      serialPort.print(F("Current max limit is: ")); serialPort.println(current_max_limit);
       // persist objective choice
       if (ENABLE_EEPROM_PERSISTENCE) {
         EEPROM.put(EEPROM_ADDR_OBJ, current_objective);
       }
     } else {
-      Serial.println(F("Usage: O<n>  e.g. O4 or O40"));
+      serialPort.println(F("Usage: O<n>  e.g. O4 or O40"));
     }
     return;
   } else if (c == 'M') {
@@ -322,51 +328,51 @@ void loop() {
       if (m > 0) {
         current_max_limit = m;
         current_objective = 0; // custom
-        Serial.print(F("Custom max limit set to: ")); Serial.println(current_max_limit);
+        serialPort.print(F("Custom max limit set to: ")); serialPort.println(current_max_limit);
       } else {
-        Serial.println(F("Invalid max limit."));
+        serialPort.println(F("Invalid max limit."));
       }
     } else {
-      Serial.println(F("Usage: M<n> e.g. M9000"));
+      serialPort.println(F("Usage: M<n> e.g. M9000"));
     }
     return;
   } else if (c == 'Q') {
-    Serial.print(F("Homed: ")); Serial.println(is_homed ? "yes" : "no");
+    serialPort.print(F("Homed: ")); serialPort.println(is_homed ? "yes" : "no");
     if (!is_homed) {
-      Serial.println(F("Position: UNHOMED - run Z to home and define pos=0"));
+      serialPort.println(F("Position: UNHOMED - run Z to home and define pos=0"));
     } else {
-      Serial.print(F("Position: ")); Serial.println(current_pos);
+      serialPort.print(F("Position: ")); serialPort.println(current_pos);
     }
-    Serial.print(F("Objective: "));
-    if (current_objective == 0) Serial.print(F("custom"));
-    else Serial.print(current_objective);
-    Serial.print(F("  Max limit: ")); Serial.println(current_max_limit);
-    Serial.print(F("STEPS_PER_PRESS: ")); Serial.println(STEPS_PER_PRESS);
-    Serial.print(F("RPM: ")); Serial.println(currentRPM);
-    Serial.print(F("Home RPM: ")); Serial.println(HOME_RPM);
-    Serial.print(F("EEPROM persistence: ")); Serial.println(ENABLE_EEPROM_PERSISTENCE ? "enabled" : "disabled");
-    Serial.print(F("EEPROM write interval (updates): ")); Serial.println(EEPROM_WRITE_INTERVAL);
+    serialPort.print(F("Objective: "));
+    if (current_objective == 0) serialPort.print(F("custom"));
+    else serialPort.print(current_objective);
+    serialPort.print(F("  Max limit: ")); serialPort.println(current_max_limit);
+    serialPort.print(F("STEPS_PER_PRESS: ")); serialPort.println(STEPS_PER_PRESS);
+    serialPort.print(F("RPM: ")); serialPort.println(currentRPM);
+    serialPort.print(F("Home RPM: ")); serialPort.println(HOME_RPM);
+    serialPort.print(F("EEPROM persistence: ")); serialPort.println(ENABLE_EEPROM_PERSISTENCE ? "enabled" : "disabled");
+    serialPort.print(F("EEPROM write interval (updates): ")); serialPort.println(EEPROM_WRITE_INTERVAL);
     return;
   }
 
   // Commands that require homing
   if (!is_homed) {
-    Serial.println(F("Error: system not homed. Run Z (hard home) to set position to 0 before using movement/position commands."));
+    serialPort.println(F("Error: system not homed. Run Z (hard home) to set position to 0 before using movement/position commands."));
     return;
   }
 
   // Movement and position-related commands (only after homing)
   if (c == 'U') {
     step_and_update(STEPS_PER_PRESS);
-    Serial.print(F("Moved U. pos=")); Serial.println(current_pos);
+    serialPort.print(F("Moved U. pos=")); serialPort.println(current_pos);
   } else if (c == 'D') {
     step_and_update(-STEPS_PER_PRESS);
-    Serial.print(F("Moved D. pos=")); Serial.println(current_pos);
+    serialPort.print(F("Moved D. pos=")); serialPort.println(current_pos);
   } else if (c == 'P') {
-    Serial.print(F("Position: ")); Serial.println(current_pos);
+    serialPort.print(F("Position: ")); serialPort.println(current_pos);
   } else if (c == 'R') {
     release_coils();
-    Serial.println(F("Coils released."));
+    serialPort.println(F("Coils released."));
   } else if (c == 'H') {
     // set internal position counter without moving: H<n>
     String num = cmd.substring(1);
@@ -380,12 +386,12 @@ void loop() {
           EEPROM.put(EEPROM_ADDR_POS, current_pos);
           eeprom_write_counter = 0;
         }
-        Serial.print(F("Internal position counter set to: ")); Serial.println(current_pos);
+        serialPort.print(F("Internal position counter set to: ")); serialPort.println(current_pos);
       } else {
-        Serial.println(F("Invalid position value."));
+        serialPort.println(F("Invalid position value."));
       }
     } else {
-      Serial.println(F("Usage: H<n> e.g. H0 (set position counter without moving)"));
+      serialPort.println(F("Usage: H<n> e.g. H0 (set position counter without moving)"));
     }
   } else if (c == 'E') {
     // force write current_pos to EEPROM now
@@ -398,15 +404,15 @@ void loop() {
       long g = num.toInt(); // signed steps
       if (g != 0) {
         step_and_update(g);
-        Serial.print(F("Moved G. pos=")); Serial.println(current_pos);
+        serialPort.print(F("Moved G. pos=")); serialPort.println(current_pos);
       } else {
-        Serial.println(F("G0 -> no movement."));
+        serialPort.println(F("G0 -> no movement."));
       }
     } else {
-      Serial.println(F("Usage: G<n> e.g. G100 or G-100 (signed steps)"));
+      serialPort.println(F("Usage: G<n> e.g. G100 or G-100 (signed steps)"));
     }
   } else {
-    Serial.print(F("Unknown command: ")); Serial.println(cmd);
+    serialPort.print(F("Unknown command: ")); serialPort.println(cmd);
     print_help();
   }
 }
