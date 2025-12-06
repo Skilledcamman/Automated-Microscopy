@@ -10,17 +10,24 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from autofocus_tenengrad import ZAxisController, tenengrad_focus, set_camera_properties, DEFAULT_PRESETS
+try:
+    from i2c_controller import I2CController
+except Exception:
+    I2CController = None
 from collections import deque
 
 
 app = Flask(__name__)
 
 # Shared resources
-SERIAL_PORT = "COM9"
-BAUD = 115200
+SERIAL_PORT = os.environ.get("MICRO_SCOPE_SERIAL", "/dev/ttyACM0")
+BAUD = int(os.environ.get("MICRO_SCOPE_BAUD", "115200"))
+USE_I2C = os.environ.get("MICRO_SCOPE_USE_I2C", "1") == "1"  # default to I2C
+I2C_ADDR = int(os.environ.get("MICRO_SCOPE_I2C_ADDR", "18"))  # 0x12 default
 CAMERA_INDEX = 0
 CURRENT_OBJECTIVE = "40"  # default objective
 shared_serial: Optional[ZAxisController] = None
+shared_i2c = None  # type: ignore
 shared_cap: Optional[cv2.VideoCapture] = None
 lock = threading.Lock()
 serial_buffer = deque(maxlen=5000)
@@ -46,6 +53,15 @@ def init_serial() -> ZAxisController:
     return shared_serial
 
 
+def init_i2c():
+    if not I2CController:
+        raise RuntimeError("I2CController module not available; install smbus2 and ensure i2c_controller.py exists")
+    global shared_i2c
+    if shared_i2c is None:
+        shared_i2c = I2CController(I2C_ADDR)
+    return shared_i2c
+
+
 def init_camera(objective: str = "40") -> cv2.VideoCapture:
     global shared_cap
     if shared_cap is None:
@@ -61,6 +77,21 @@ def init_camera(objective: str = "40") -> cv2.VideoCapture:
         set_camera_properties(cap, preset["exposure"], preset["gain"])
         shared_cap = cap
     return shared_cap
+
+
+def apply_camera_preset_with_retry(cap: cv2.VideoCapture, exposure: float, gain: float, retries: int = 5, delay: float = 0.15) -> bool:
+    """On Linux some drivers ignore property sets unless retried; attempt multiple times and verify."""
+    ok = False
+    for _ in range(retries):
+        set_camera_properties(cap, exposure, gain)
+        time.sleep(delay)
+        # verify if backend reports props (may still fail silently on some drivers)
+        got_exp = cap.get(cv2.CAP_PROP_EXPOSURE)
+        got_gain = cap.get(cv2.CAP_PROP_GAIN)
+        if got_exp != 0 or got_gain != 0:
+            ok = True
+            break
+    return ok
 
 
 @app.route("/")
@@ -93,12 +124,23 @@ def console():
     cmd = data.get("cmd", "").strip()
     if not cmd:
         return jsonify({"ok": False, "error": "Empty command"}), 400
-    ser = init_serial()
-    with lock:
-        ser._send(cmd)
-        lines = ser._read_until(lambda l: True, timeout=0.4)
-        _buffer_lines(lines)
-    return jsonify({"ok": True, "output": "\n".join(lines)})
+    if USE_I2C:
+        i2c = init_i2c()
+        with lock:
+            try:
+                out = i2c.send_ascii(cmd)
+                if out:
+                    _buffer_lines(out.splitlines())
+                return jsonify({"ok": True, "output": out})
+            except Exception as e:
+                return jsonify({"ok": False, "error": str(e)}), 500
+    else:
+        ser = init_serial()
+        with lock:
+            ser._send(cmd)
+            lines = ser._read_until(lambda l: True, timeout=0.4)
+            _buffer_lines(lines)
+        return jsonify({"ok": True, "output": "\n".join(lines)})
 
 
 @app.route("/console/drain", methods=["GET"])  # return buffered serial output only
@@ -112,7 +154,7 @@ def console_drain():
 
 def autofocus_run(preset_level: str):
     """Run autofocus with shared serial and camera using preset levels."""
-    ser = init_serial()
+    ser = init_serial() if not USE_I2C else None
     cap = init_camera(CURRENT_OBJECTIVE)
 
     # Map preset to parameters
@@ -126,11 +168,19 @@ def autofocus_run(preset_level: str):
         raise ValueError("Unknown preset level")
 
     # Configure objective and speed
-    with lock:
-        ser.home(raise_steps=0)
-        ser.set_objective(params["objective"])
-        max_limit = ser.get_max_limit()
-        ser.set_speed_rpm(params["rpm"])
+    if USE_I2C:
+        i2c = init_i2c()
+        with lock:
+            i2c.home()
+            i2c.set_objective(params["objective"])
+            max_limit = i2c.get_max_limit()
+            i2c.set_rpm(params["rpm"])
+    else:
+        with lock:
+            ser.home(raise_steps=0)
+            ser.set_objective(params["objective"])
+            max_limit = ser.get_max_limit()
+            ser.set_speed_rpm(params["rpm"])
 
     # Ensure camera props match objective
     preset = DEFAULT_PRESETS[params["objective"]]
@@ -138,10 +188,10 @@ def autofocus_run(preset_level: str):
 
     # Start at 0
     with lock:
-        pos = ser.get_position()
+        pos = (init_i2c().get_position() if USE_I2C else ser.get_position())
         if pos != 0:
-            ser.move_steps(-pos)
-            pos = ser.get_position()
+            (init_i2c().move_steps(-pos) if USE_I2C else ser.move_steps(-pos))
+            pos = (init_i2c().get_position() if USE_I2C else ser.get_position())
 
     best_focus = -1.0
     best_pos = 0
@@ -166,10 +216,10 @@ def autofocus_run(preset_level: str):
 
     # Move to best and optionally fine adjust by sweeping
     with lock:
-        current_pos = ser.get_position()
+        current_pos = (init_i2c().get_position() if USE_I2C else ser.get_position())
         delta = best_pos - current_pos
         if delta != 0:
-            ser.move_steps(delta)
+            (init_i2c().move_steps(delta) if USE_I2C else ser.move_steps(delta))
 
     ret, final_frame = cap.read()
     final_fm = -1.0
@@ -217,7 +267,7 @@ def autofocus_run(preset_level: str):
         "best_focus": best_focus,
         "best_pos": best_pos,
         "final_focus": final_fm,
-        "final_pos": init_serial().get_position(),
+        "final_pos": (init_i2c().get_position() if USE_I2C else init_serial().get_position()),
     }
 
 
@@ -231,14 +281,33 @@ def set_objective_endpoint():
         return jsonify({"ok": False, "error": "Invalid objective. Use 4, 10, or 40."}), 400
     # Update shared state
     CURRENT_OBJECTIVE = obj
-    ser = init_serial()
+    ser = init_serial() if not USE_I2C else None
     cap = init_camera(obj)
-    # Apply camera props and send serial command
+    # Apply camera props (retry on Linux) and send serial command
     preset = DEFAULT_PRESETS[obj]
-    with lock:
-        ser.set_objective(obj)
-    set_camera_properties(cap, preset["exposure"], preset["gain"]) 
-    return jsonify({"ok": True, "objective": obj})
+    if USE_I2C:
+        with lock:
+            init_i2c().set_objective(obj)
+    else:
+        with lock:
+            ser.set_objective(obj)
+    ok_props = apply_camera_preset_with_retry(cap, preset["exposure"], preset["gain"]) 
+    result = {"ok": True, "objective": obj, "cameraPropsSet": ok_props}
+    return jsonify(result)
+
+
+@app.route("/camera/properties", methods=["POST"])
+def camera_properties_endpoint():
+    """Set camera exposure/gain explicitly from UI controls."""
+    data = request.get_json(force=True)
+    try:
+        exposure = float(data.get("exposure"))
+        gain = float(data.get("gain"))
+    except Exception:
+        return jsonify({"ok": False, "error": "Invalid exposure/gain"}), 400
+    cap = init_camera(CURRENT_OBJECTIVE)
+    ok_props = apply_camera_preset_with_retry(cap, exposure, gain)
+    return jsonify({"ok": ok_props, "exposure": exposure, "gain": gain})
 
 
 @app.route("/autofocus", methods=["POST"])
@@ -255,24 +324,28 @@ def autofocus_endpoint():
 @app.route("/home", methods=["POST"])
 def home_endpoint():
     """Home Z axis via shared serial."""
-    ser = init_serial()
+    ser = init_serial() if not USE_I2C else None
     try:
-        # send raw command to ensure output is capturable, then read and buffer for a short while
-        with lock:
-            ser._send("Z")
-        # Read for up to 2 seconds collecting any lines
-        t0 = time.time()
-        lines = []
-        while time.time() - t0 < 2.0:
+        if USE_I2C:
             with lock:
-                chunk = ser._read_until(lambda l: True, timeout=0.2)
-            if chunk:
-                lines.extend(chunk)
-            else:
-                # small sleep to avoid busy loop
-                time.sleep(0.05)
-        with lock:
-            _buffer_lines(lines)
+                init_i2c().home()
+        else:
+            # send raw command to ensure output is capturable, then read and buffer for a short while
+            with lock:
+                ser._send("Z")
+            # Read for up to 2 seconds collecting any lines
+            t0 = time.time()
+            lines = []
+            while time.time() - t0 < 2.0:
+                with lock:
+                    chunk = ser._read_until(lambda l: True, timeout=0.2)
+                if chunk:
+                    lines.extend(chunk)
+                else:
+                    # small sleep to avoid busy loop
+                    time.sleep(0.05)
+            with lock:
+                _buffer_lines(lines)
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -283,26 +356,35 @@ def move_endpoint():
     """Move Z axis by signed steps: { steps: 100 }"""
     data = request.get_json(force=True)
     steps = int(data.get("steps", 0))
-    ser = init_serial()
+    ser = init_serial() if not USE_I2C else None
     if steps == 0:
         return jsonify({"ok": False, "error": "steps must be non-zero"}), 400
     try:
-        with lock:
-            ser.move_steps(steps)
-        # try to capture any immediate lines for a short window
-        with lock:
-            chunk = ser._read_until(lambda l: True, timeout=0.2)
-        _buffer_lines(chunk)
-        with lock:
-            pos = ser.get_position()
-        return jsonify({"ok": True, "position": pos})
+        if USE_I2C:
+            with lock:
+                init_i2c().move_steps(steps)
+                pos = init_i2c().get_position()
+            return jsonify({"ok": True, "position": pos})
+        else:
+            with lock:
+                ser.move_steps(steps)
+            # try to capture any immediate lines for a short window
+            with lock:
+                chunk = ser._read_until(lambda l: True, timeout=0.2)
+            _buffer_lines(chunk)
+            with lock:
+                pos = ser.get_position()
+            return jsonify({"ok": True, "position": pos})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
 def create_app():
     # Initialize shared resources on startup
-    init_serial()
+    if USE_I2C:
+        init_i2c()
+    else:
+        init_serial()
     init_camera()
     return app
 

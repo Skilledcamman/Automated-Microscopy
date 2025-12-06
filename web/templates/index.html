@@ -32,6 +32,18 @@
               </select>
               <button id="applyObjectiveBtn">Apply</button>
             </div>
+            <div class="camera-props" style="margin-top:10px;">
+              <details open>
+                <summary>Exposure & Gain</summary>
+                <div class="props-row" style="display:flex; gap:1rem; align-items:center; flex-wrap:wrap;">
+                  <label class="small" for="exposureInput" style="color:#9aa">Exposure:</label>
+                  <input id="exposureInput" type="number" step="0.1" value="-5" style="width:90px;"/>
+                  <label class="small" for="gainInput" style="color:#9aa">Gain:</label>
+                  <input id="gainInput" type="number" step="1" value="50" style="width:90px;"/>
+                  <button id="applyPropsBtn">Apply</button>
+                </div>
+              </details>
+            </div>
           </div>
 
           <details open class="af-section" style="margin-top:12px;">
@@ -126,6 +138,10 @@
             const rpmValue = document.getElementById('rpmValue');
             const goInput = document.getElementById('goInput');
             const goBtn = document.getElementById('goBtn');
+            // Camera props controls
+            const exposureInput = document.getElementById('exposureInput');
+            const gainInput = document.getElementById('gainInput');
+            const applyPropsBtn = document.getElementById('applyPropsBtn');
 
             // Console: robust output appender with trimming and autoscroll
             function appendLog(msg, cls='log-serial') {
@@ -269,8 +285,21 @@
                 const res = await fetch('/objective', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({objective: obj}) });
                 const data = await res.json();
                 if (!data.ok) appendLog('Objective error: '+(data.error||''),'log-af');
+                else if (data.cameraPropsSet === false) appendLog('Warning: camera properties may not have applied','log-af');
               } catch(e){ appendLog('Objective set error: '+e,'log-af'); }
             }
+                        async function applyCameraProps(){
+                          const exposure = parseFloat(exposureInput.value);
+                          const gain = parseFloat(gainInput.value);
+                          if (!Number.isFinite(exposure) || !Number.isFinite(gain)) { appendLog('Invalid exposure/gain','log-af'); return; }
+                          try {
+                            const r = await fetch('/camera/properties', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ exposure, gain }) });
+                            const j = await r.json();
+                            if (!j.ok) appendLog('Failed to set camera props','log-af');
+                            else appendLog(`Camera props set: exposure=${j.exposure}, gain=${j.gain}`,'log-stream');
+                          } catch(e){ appendLog('Props error: '+e,'log-af'); }
+                        }
+                        if (applyPropsBtn) applyPropsBtn.onclick = applyCameraProps;
             // Auto-apply on change
             if (objectiveSelect) objectiveSelect.addEventListener('change', ()=> applyObjective(objectiveSelect.value));
             // Keep manual Apply button
