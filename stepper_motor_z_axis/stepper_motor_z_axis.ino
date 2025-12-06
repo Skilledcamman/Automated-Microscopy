@@ -34,8 +34,8 @@ Stepper myStepper = Stepper(stepsPerRevolution, PIN_IN1, PIN_IN2, PIN_IN3, PIN_I
 
 // SoftwareSerial for external UART on dedicated pins
 // Adjust these pins to your wiring if needed
-const uint8_t UART_RX_PIN = 2; // connect to external TX
-const uint8_t UART_TX_PIN = 3; // connect to external RX
+const uint8_t UART_RX_PIN = 1; // connect to external TX (Arduino Uno TX pin)
+const uint8_t UART_TX_PIN = 2; // connect to external RX
 SoftwareSerial serialPort(UART_RX_PIN, UART_TX_PIN); // RX, TX
 
 // Behaviour defaults
