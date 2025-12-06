@@ -381,6 +381,10 @@ def move_endpoint():
 
 def create_app():
     # Initialize shared resources on startup
+    global USE_I2C
+    if USE_I2C and I2CController is None:
+        # Auto-fallback to serial if I2C unavailable
+        USE_I2C = False
     if USE_I2C:
         init_i2c()
     else:
