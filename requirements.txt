@@ -1,0 +1,5 @@
+opencv-python
+pyserial
+numpy
+Flask
+ultralytics
